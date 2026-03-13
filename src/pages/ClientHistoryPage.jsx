@@ -1,28 +1,11 @@
 // src/pages/ClientHistoryPage.jsx
-import React, { useState, useEffect, useCallback } from 'react';
-import { supabase } from '../services/supabaseClient';
+import React, { useState } from 'react';
+import { useClientHistory } from '../hooks/useClientHistory';
 import Lightbox from '../components/Lightbox';
 
 const ClientHistoryPage = ({ client, onBack }) => {
-  const [workoutLogs, setWorkoutLogs] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const { workoutLogs, loading } = useClientHistory(client.id);
   const [lightboxImageUrl, setLightboxImageUrl] = useState(null);
-
-  const fetchHistory = useCallback(async () => {
-    setLoading(true);
-    const { data } = await supabase
-      .from('workout_logs')
-      .select(`*, programs (name)`)
-      .eq('client_id', client.id)
-      .order('completed_at', { ascending: false });
-    
-    if (data) setWorkoutLogs(data);
-    setLoading(false);
-  }, [client.id]);
-
-  useEffect(() => {
-    fetchHistory();
-  }, [fetchHistory]);
 
   const ratings = { 1: '😩', 2: '😟', 3: '🙂', 4: '😊', 5: '😎' };
 

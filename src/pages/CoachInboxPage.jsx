@@ -1,32 +1,13 @@
 // src/pages/CoachInboxPage.jsx
-import React, { useState, useEffect } from 'react';
-import { supabase } from '../services/supabaseClient';
+import React from 'react';
+import { useCoachInbox } from '../hooks/useCoachInbox';
 
 const ChatIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
 );
 
 const CoachInboxPage = ({ onSelectClient }) => {
-  const [clients, setClients] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const fetchClients = async () => {
-      setLoading(true);
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        // On récupère simplement la liste des clients pour l'instant
-        const { data } = await supabase
-          .from('clients')
-          .select('*')
-          .eq('coach_id', user.id)
-          .order('full_name', { ascending: true });
-        if (data) setClients(data);
-      }
-      setLoading(false);
-    };
-    fetchClients();
-  }, []);
+  const { clients, loading } = useCoachInbox();
 
   return (
     <div className="screen">

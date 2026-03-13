@@ -1,6 +1,6 @@
 // src/pages/ClientDashboardPage.jsx
-import React, { useState, useCallback, useEffect } from 'react';
-import { supabase } from '../services/supabaseClient';
+import React, { useState } from 'react';
+import { useClientDashboard } from '../hooks/useClientDashboard';
 import ClientBottomNav from '../components/ClientBottomNav';
 import ClientHeaderNav from '../components/ClientHeaderNav';
 import useWindowSize from '../hooks/useWindowSize';
@@ -22,40 +22,11 @@ const ClientAccountPage = ({ client, onLogout }) => (
 
 const ClientDashboardPage = ({ client, onLogout }) => {
   const [activeView, setActiveView] = useState('program');
-  const [assignedPrograms, setAssignedPrograms] = useState([]);
-  const [workoutLogs, setWorkoutLogs] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const { assignedPrograms, workoutLogs, loading, fetchClientData } = useClientDashboard(client.id);
   const [selectedAssignment, setSelectedAssignment] = useState(null);
 
   const { width } = useWindowSize();
   const isDesktop = width > 900;
-
-  const fetchClientData = useCallback(async () => {
-    setLoading(true);
-    const { data: programsData } = await supabase
-      .from('client_programs')
-      .select(`*, programs (*, exercises (*))`)
-      .eq('client_id', client.id);
-      
-    if (programsData) {
-        const validPrograms = programsData.filter(assignment => assignment.programs);
-        setAssignedPrograms(validPrograms);
-    }
-
-    const { data: logsData } = await supabase
-        .from('workout_logs')
-        .select('*, programs(name)')
-        .eq('client_id', client.id)
-        .order('completed_at', { ascending: false });
-
-    if (logsData) setWorkoutLogs(logsData);
-    
-    setLoading(false);
-  }, [client.id]);
-
-  useEffect(() => {
-    fetchClientData();
-  }, [fetchClientData]);
 
   const renderActiveView = () => {
     if (selectedAssignment) {

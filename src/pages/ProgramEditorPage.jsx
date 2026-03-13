@@ -1,37 +1,42 @@
 // src/pages/ProgramEditorPage.jsx
-import React, { useState, useEffect, useCallback } from 'react';
-import { supabase } from '../services/supabaseClient';
-import { useNotification } from '../contexts/NotificationContext';
-import { DndContext, closestCenter, PointerSensor, TouchSensor, useSensor, useSensors } from '@dnd-kit/core';
-import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import React, { useState, useMemo } from 'react';
+import { useProgramEditor } from '../hooks/useProgramEditor';
+import { DndContext, closestCenter, pointerWithin, rectIntersection, DragOverlay, PointerSensor, TouchSensor, useSensor, useSensors, useDroppable } from '@dnd-kit/core';
+import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
 import ConfirmModal from '../components/ConfirmModal';
 import ExerciseEditorModal from '../components/ExerciseEditorModal';
 import AddFromLibraryModal from '../components/AddFromLibraryModal';
 import LibraryPanel from '../components/LibraryPanel';
-import AddSectionModal from '../components/AddSectionModal';
 import useWindowSize from '../hooks/useWindowSize';
 
+/* ─── Icônes ─── */
 const DragHandleIcon = () => (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="12" r="1"></circle><circle cx="9" cy="5" r="1"></circle><circle cx="9" cy="19" r="1"></circle><circle cx="15" cy="12" r="1"></circle><circle cx="15" cy="5" r="1"></circle><circle cx="15" cy="19" r="1"></circle></svg>
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#cbd5e1" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="12" r="1"/><circle cx="9" cy="5" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="19" r="1"/></svg>
 );
-
-const LinkIcon = ({ active }) => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={active ? "currentColor" : "currentColor"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
-        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+const DeleteIcon = () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+);
+const SupersetIcon = () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#28a745" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+    </svg>
+);
+const CircuitIcon = () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#28a745" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
     </svg>
 );
 
-const formatDurationDisplay = (duration) => {
-    if (!duration) return null;
-    if (String(duration).match(/[ms]/)) return duration;
-    return `${duration}min`;
-};
+const PlusCircleIcon = () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+);
 
 const getEmojiForType = (type) => {
-    switch(type) {
+    switch (type) {
         case 'Renforcement': return '🏋️‍♂️';
         case 'Cardio': return '❤️';
         case 'Mobilité': return '🧘';
@@ -40,366 +45,501 @@ const getEmojiForType = (type) => {
     }
 };
 
-const sanitizeData = (data) => {
-    const cleaned = { ...data };
-    Object.keys(cleaned).forEach(key => { if (cleaned[key] === '') cleaned[key] = null; });
-    return cleaned;
+/* ─── Helpers ─── */
+const getEffortLabel = (item) => {
+    const effortType = item.effort_type;
+    if (effortType === 'Intervalle' && item.reps_min && item.reps_max) return `${item.reps_min}-${item.reps_max}`;
+    if (effortType === 'Max Rép') return 'Max';
+    if (effortType === 'Max Temps') return 'Max';
+    if (effortType === 'Temps' && item.duration_minutes) return item.duration_minutes;
+    if (item.reps) return `${item.reps}`;
+    if (item.duration_minutes) return item.duration_minutes;
+    return '—';
 };
 
-// --- LOGIQUE D'AFFICHAGE INTELLIGENTE ---
-const getExerciseDetails = (item, isLeader, isFollower) => {
-    // Cas 1 : Suiveur (on cache les séries car définies par le chef)
-    if (isFollower) {
-        if (item.reps) return `${item.reps} reps`;
-        if (item.duration_minutes) return formatDurationDisplay(item.duration_minutes);
-        return '...';
-    }
-
-    // Cas 2 : Chef de file (Séries = Tours)
-    if (isLeader) {
-         const tours = item.sets || 1;
-         let effort = "";
-         if (item.reps) effort = `${item.reps} reps`;
-         else if (item.duration_minutes) effort = formatDurationDisplay(item.duration_minutes);
-         
-         return `🔄 ${tours} Tours • ${effort}`;
-    }
-
-    // Cas 3 : Exercice standard
-    if (item.sets && item.reps) return `${item.sets} × ${item.reps}`;
-    if (item.duration_minutes) {
-        const dur = formatDurationDisplay(item.duration_minutes);
-        return item.sets ? `${item.sets} × ${dur}` : dur;
-    }
-    if (item.sets) return `${item.sets} séries`;
-    return '';
+/** Parse rest_time ("mm:ss", "XmYs", or raw seconds) → number of seconds */
+const parseRestToSeconds = (val) => {
+    if (val == null || val === '') return '';
+    // Already a number
+    if (typeof val === 'number') return val;
+    const str = String(val).trim();
+    // Pure number (seconds)
+    if (/^\d+$/.test(str)) return Number(str);
+    // mm:ss format
+    const mmss = str.match(/^(\d{1,2}):(\d{2})$/);
+    if (mmss) return Number(mmss[1]) * 60 + Number(mmss[2]);
+    // XmYs format
+    let sec = 0;
+    const m = str.match(/(\d+)\s*m/);
+    const s = str.match(/(\d+)\s*s/);
+    if (m) sec += Number(m[1]) * 60;
+    if (s) sec += Number(s[1]);
+    return sec || '';
 };
 
-const SortableItem = ({ item, index, items, onEdit, onDelete, onToggleLink }) => {
+const getChargeLabel = (item) => {
+    const ct = item.charge_type;
+    if (ct === 'bw' || ct === 'Poids du corps') return 'POIDS (BW)';
+    if (ct === 'lbs') return 'POIDS (LBS)';
+    if (ct === 'Aucune') return 'CHARGE';
+    return 'POIDS (KG)';
+};
+
+/* ─── Execution modes ─── */
+const EXECUTION_MODES = [
+    { id: 'Classique', label: 'Classique' },
+    { id: 'Circuit', label: 'Circuit' },
+    { id: 'AMRAP', label: 'AMRAP' },
+    { id: 'TABATA', label: 'Tabata' },
+    { id: 'EMOM', label: 'EMOM' },
+    { id: 'E2MOM', label: 'E2MOM' },
+    { id: 'E3MOM', label: 'E3MOM' },
+    { id: 'E4MOM', label: 'E4MOM' },
+    { id: 'E5MOM', label: 'E5MOM' },
+];
+
+const getGroupLabel = (count, mode) => {
+    if (mode === 'Circuit' || mode === 'TABATA' || count >= 4) return `Circuit (${count} Exercices)`;
+    if (count === 2) return 'Superset';
+    if (count === 3) return 'Triset';
+    return `Groupe (${count})`;
+};
+
+const useCircuitLayout = (mode, count) => mode === 'Circuit' || mode === 'TABATA' || count >= 4;
+
+/* ─── Custom collision detection ─── */
+const customCollision = (args) => {
+    // First check pointer-within for drop zones (group-drop-*, solo-drop-*)
+    const pointerCollisions = pointerWithin(args);
+    const dropZoneHit = pointerCollisions.find(c =>
+        String(c.id).startsWith('group-drop-') || String(c.id).startsWith('solo-drop-')
+    );
+    if (dropZoneHit) return [dropZoneHit];
+
+    // Fall back to closestCenter for sortable list reordering
+    return closestCenter(args);
+};
+
+/* ─── Droppable wrapper ─── */
+const DroppableExerciseList = ({ children }) => {
+    const { setNodeRef, isOver } = useDroppable({ id: 'exercise-list-droppable' });
+    return (
+        <div ref={setNodeRef} className={`pe-exercise-list${isOver ? ' drop-target-active' : ''}`}>
+            {children}
+        </div>
+    );
+};
+
+/* ─── Section Header (sortable) ─── */
+const SortableSectionHeader = ({ item, onDelete }) => {
+    const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: item.id });
+    const style = { transform: CSS.Transform.toString(transform), transition };
+    return (
+        <div ref={setNodeRef} style={style} className="pe-section-header" {...attributes}>
+            <div {...listeners} className="pe-drag-handle"><DragHandleIcon /></div>
+            <h4>{item.name}</h4>
+            <button className="pe-delete-btn-sm" onClick={() => onDelete(item)}>🗑️</button>
+        </div>
+    );
+};
+
+/* ─── Superset Exercise Sub-Card (sortable) ─── */
+const SortableSupersetExercise = ({ item, onEdit, onDelete, onUpdateItemField }) => {
     const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: item.id });
     const style = { transform: CSS.Transform.toString(transform), transition };
 
-    if (item.is_section_header) {
-        return (
-            <div ref={setNodeRef} style={style} className="section-header-item">
-                <div {...attributes} {...listeners} className="drag-handle"><DragHandleIcon /></div>
-                <h4 className="section-title">{item.name}</h4>
-                <button className="delete-icon" onClick={() => onDelete(item)}>🗑️</button>
-            </div>
-        );
-    }
-
-    const isLinkedToNext = item.superset_id && items[index + 1] && items[index + 1].superset_id === item.superset_id;
-    const isLinkedToPrev = item.superset_id && items[index - 1] && items[index - 1].superset_id === item.superset_id;
-    
-    // Leader = Celui qui commence la chaîne (n'est pas lié au précédent, mais lié au suivant)
-    // OU Exercice seul (ni l'un ni l'autre -> traité comme Leader standard)
-    const isSupersetLeader = isLinkedToNext && !isLinkedToPrev;
-    const isSupersetFollower = isLinkedToPrev;
-
-    let cardStyle = "exercise-card editor indented";
-    if (isLinkedToNext && !isLinkedToPrev) cardStyle += " superset-top";
-    if (isLinkedToPrev && isLinkedToNext) cardStyle += " superset-middle";
-    if (isLinkedToPrev && !isLinkedToNext) cardStyle += " superset-bottom";
-
     return (
-        <div ref={setNodeRef} style={style} className={cardStyle}>
-            <div className="exercise-content-wrapper">
-                <div {...attributes} {...listeners} className="drag-handle"><DragHandleIcon /></div>
-                <div className="exercise-card-main-content" onClick={() => onEdit(item, isSupersetFollower)}>
-                    <div className={`exercise-type-icon ${item.type?.toLowerCase()}`}>
-                        {getEmojiForType(item.type)}
+        <div ref={setNodeRef} style={style} className="pe-superset-exo" {...attributes}>
+            <div className="pe-superset-exo-top">
+                <div className="pe-superset-exo-left" onClick={() => onEdit(item, true)}>
+                    <div className="pe-thumb-round">
+                        {item.photo_url ? <img src={item.photo_url} alt={item.name} /> : <span>{getEmojiForType(item.type)}</span>}
                     </div>
-                    <div className="exercise-card-info">
-                        <h3>{item.name}</h3>
-                        
-                        <p style={{fontWeight: 500, color: isSupersetLeader ? 'var(--primary-color)' : 'var(--text-dark)'}}>
-                            {getExerciseDetails(item, isSupersetLeader, isSupersetFollower)}
-                        </p>
-
-                        {item.charge && <span style={{fontSize: '12px', color: '#666'}}>Charge : {item.charge}</span>}
-
-                        {item.comment && (
-                            <p style={{ color: 'var(--text-light)', fontStyle: 'italic', fontSize: '12px', marginTop: '2px' }}>
-                                💡 {item.comment}
-                            </p>
-                        )}
-
-                        {item.body_part && (
-                            <p style={{ color: 'var(--primary-color)', fontWeight: 500, fontSize: '12px', marginTop: '4px' }}>
-                                {item.body_part === 'Tout le corps' && '🧍 '}
-                                {item.body_part === 'Dos' && '🔙 '}
-                                {item.body_part === 'Pectoraux' && '👕 '}
-                                {item.body_part === 'Epaules' && '🥥 '}
-                                {item.body_part === 'Bras' && '💪 '}
-                                {item.body_part === 'Abdo' && '🍫 '}
-                                {item.body_part === 'Fessiers' && '🍑 '}
-                                {item.body_part === 'Jambes' && '🦵 '}
-                                {item.body_part}
-                            </p>
-                        )}
+                    <div className="pe-exo-details">
+                        <h4>{item.name}</h4>
+                        <span className="pe-muscles">{item.body_part || ''}</span>
                     </div>
                 </div>
-                <button className="delete-icon" onClick={() => onDelete(item)}>🗑️</button>
+                {item.body_part && <span className="pe-body-badge">{item.body_part.split(',')[0].trim().toUpperCase()}</span>}
+                <div className="pe-subcard-actions">
+                    <div {...listeners} className="pe-drag-handle pe-drag-sm"><DragHandleIcon /></div>
+                    <button className="pe-delete-btn-sm" onClick={(e) => { e.stopPropagation(); onDelete(item); }}><DeleteIcon /></button>
+                </div>
             </div>
-            
-            <div className="editor-card-footer">
-                {item.rest_time ? (
-                    <div className="rest-time-indicator" style={{border: 'none', padding: 0, background: 'none'}}>
-                        🕒 <span style={{marginLeft: '6px'}}>{item.rest_time}</span>
-                    </div>
-                ) : (<div></div>)}
-                
-                {index < items.length - 1 && !items[index+1].is_section_header && (
-                    <button 
-                        className={`link-button ${isLinkedToNext ? 'active' : ''}`} 
-                        onClick={() => onToggleLink(index)}
-                        title={isLinkedToNext ? "Dissocier" : "Créer un Superset"}
-                    >
-                        <LinkIcon active={isLinkedToNext} />
-                        <span>{isLinkedToNext ? "Lié" : "Lier"}</span>
-                    </button>
-                )}
+            <div className="pe-inline-fields" onPointerDown={(e) => e.stopPropagation()}>
+                <div className="pe-inline-field">
+                    <label>SETS</label>
+                    <input type="number" value={item.sets || ''} onChange={(e) => onUpdateItemField(item.id, 'sets', e.target.value)} placeholder="—" />
+                </div>
+                <div className="pe-inline-field">
+                    <label>REPS</label>
+                    <input type="text" value={getEffortLabel(item) === '—' ? '' : getEffortLabel(item)} onChange={(e) => onUpdateItemField(item.id, 'reps', e.target.value)} placeholder="—" />
+                </div>
+                <div className="pe-inline-field">
+                    <label>REST (SEC)</label>
+                    <input type="number" value={parseRestToSeconds(item.rest_time)} onChange={(e) => onUpdateItemField(item.id, 'rest_time', e.target.value)} placeholder="—" />
+                </div>
+                <div className="pe-inline-field pe-field-accent">
+                    <label>{getChargeLabel(item)}</label>
+                    <input type="number" value={item.charge || ''} onChange={(e) => onUpdateItemField(item.id, 'charge', e.target.value)} placeholder="—" />
+                </div>
             </div>
         </div>
     );
 };
 
-const ProgramEditorPage = ({ programId, onBack, onDirtyChange }) => {
-    const { addToast } = useNotification();
-    const [program, setProgram] = useState({ name: '', environment: 'Salle' });
-    const [items, setItems] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [isSaving, setIsSaving] = useState(false);
-    
-    const [isExerciseModalOpen, setIsExerciseModalOpen] = useState(false);
-    // Nouvel état pour savoir si on édite un "suiveur"
-    const [isEditingFollower, setIsEditingFollower] = useState(false);
+/* ─── Circuit Exercise Item (sortable) ─── */
+const SortableCircuitExercise = ({ item, circuitNumber, onEdit, onDelete }) => {
+    const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: item.id });
+    const style = { transform: CSS.Transform.toString(transform), transition };
 
-    const [isSectionModalOpen, setIsSectionModalOpen] = useState(false);
+    return (
+        <div ref={setNodeRef} style={style} className="pe-circuit-item" {...attributes}>
+            <span className="pe-circuit-num">{String(circuitNumber).padStart(2, '0')}</span>
+            <span className="pe-circuit-name" onClick={() => onEdit(item, true)}>{item.name}</span>
+        </div>
+    );
+};
+
+/* ─── Droppable Group Zone ─── */
+const DroppableGroupZone = ({ supersetId, isOver: isOverProp, children }) => {
+    const { setNodeRef, isOver } = useDroppable({ id: `group-drop-${supersetId}` });
+    return (
+        <div ref={setNodeRef} className={`pe-group-card-drop${isOver ? ' drop-hover' : ''}`}>
+            {children}
+        </div>
+    );
+};
+
+/* ─── Droppable Solo Zone ─── */
+const DroppableSoloZone = ({ itemId, children }) => {
+    const { setNodeRef, isOver } = useDroppable({ id: `solo-drop-${itemId}` });
+    return (
+        <div ref={setNodeRef} className={`pe-solo-drop${isOver ? ' drop-hover' : ''}`}>
+            {children}
+        </div>
+    );
+};
+
+/* ─── Solo Exercise Card (sortable) ─── */
+const SortableSoloExercise = ({ item, onEdit, onDelete, onUpdateItemField }) => {
+    const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: item.id });
+    const style = { transform: CSS.Transform.toString(transform), transition };
+
+    return (
+        <div ref={setNodeRef} style={style} className="pe-solo-card" {...attributes}>
+            <div className="pe-solo-top">
+                <div className="pe-solo-left" onClick={() => onEdit(item, false)}>
+                    <div className="pe-thumb-round">
+                        {item.photo_url ? <img src={item.photo_url} alt={item.name} /> : <span>{getEmojiForType(item.type)}</span>}
+                    </div>
+                    <div className="pe-exo-details">
+                        <h4>{item.name}</h4>
+                        <span className="pe-muscles">{item.body_part || ''}</span>
+                    </div>
+                </div>
+                {item.body_part && <span className="pe-body-badge">{item.body_part.split(',')[0].trim().toUpperCase()}</span>}
+                <div className="pe-solo-actions">
+                    <div {...listeners} className="pe-drag-handle"><DragHandleIcon /></div>
+                    <button className="pe-delete-btn-sm" onClick={(e) => { e.stopPropagation(); onDelete(item); }}><DeleteIcon /></button>
+                </div>
+            </div>
+            <div className="pe-inline-fields" onPointerDown={(e) => e.stopPropagation()}>
+                <div className="pe-inline-field">
+                    <label>SETS</label>
+                    <input type="number" value={item.sets || ''} onChange={(e) => onUpdateItemField(item.id, 'sets', e.target.value)} placeholder="—" />
+                </div>
+                <div className="pe-inline-field">
+                    <label>REPS</label>
+                    <input type="text" value={getEffortLabel(item) === '—' ? '' : getEffortLabel(item)} onChange={(e) => onUpdateItemField(item.id, 'reps', e.target.value)} placeholder="—" />
+                </div>
+                <div className="pe-inline-field">
+                    <label>REST (SEC)</label>
+                    <input type="number" value={parseRestToSeconds(item.rest_time)} onChange={(e) => onUpdateItemField(item.id, 'rest_time', e.target.value)} placeholder="—" />
+                </div>
+                <div className="pe-inline-field pe-field-accent">
+                    <label>{getChargeLabel(item)}</label>
+                    <input type="number" value={item.charge || ''} onChange={(e) => onUpdateItemField(item.id, 'charge', e.target.value)} placeholder="—" />
+                </div>
+            </div>
+        </div>
+    );
+};
+
+/* ═══════════════════════════════════════════
+   PAGE PRINCIPALE
+   ═══════════════════════════════════════════ */
+const ProgramEditorPage = ({ programId, onBack, onDirtyChange }) => {
+    const {
+        program, items, loading, isSaving, isNewProgram, activeDragData,
+        handleProgramChange, handleChangeExecutionMode,
+        handleUpdateItemField, handleUngroupItem,
+        handleSaveItem, handleSaveNewTemplateAndAdd,
+        handleAddExerciseFromPanel, handleAddExercisesFromLibrary, handleDeleteItem,
+        handleSaveProgram, handleDeleteProgram,
+        handleDragStart, handleDragEnd, handleDragCancel,
+    } = useProgramEditor(programId, onDirtyChange);
+
+    const [isExerciseModalOpen, setIsExerciseModalOpen] = useState(false);
+    const [isEditingFollower, setIsEditingFollower] = useState(false);
     const [showLibraryModal, setShowLibraryModal] = useState(false);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-    
     const [itemToEdit, setItemToEdit] = useState(null);
     const [itemToDelete, setItemToDelete] = useState(null);
     const [isCreatingForLibrary, setIsCreatingForLibrary] = useState(false);
 
     const { width } = useWindowSize();
-    const isDesktop = width > 1024; 
-    const isNewProgram = programId === 'new';
+    const isDesktop = width > 1024;
 
-    const markAsDirty = useCallback(() => { if (onDirtyChange) onDirtyChange(true); }, [onDirtyChange]);
-
-    const fetchProgramData = useCallback(async () => {
-        if (isNewProgram) { setLoading(false); return; }
-        setLoading(true);
-        const { data: programData } = await supabase.from('programs').select('*').eq('id', programId).single();
-        if (programData) {
-            setProgram({
-                name: programData.name,
-                environment: programData.environment || 'Salle',
-            });
-            const { data: exercisesData } = await supabase.from('exercises').select('*').eq('program_id', programId).order('order', { ascending: true });
-            setItems(exercisesData || []);
-        }
-        setLoading(false);
-        if (onDirtyChange) onDirtyChange(false);
-    }, [programId, isNewProgram, onDirtyChange]);
-
-    useEffect(() => { fetchProgramData(); }, [fetchProgramData]);
-
-    const handleToggleLink = (index) => {
-        const newItems = [...items];
-        const currentItem = newItems[index];
-        const nextItem = newItems[index + 1];
-        if (!nextItem) return;
-
-        if (currentItem.superset_id && currentItem.superset_id === nextItem.superset_id) {
-            nextItem.superset_id = null;
-        } else {
-            const sharedId = currentItem.superset_id || crypto.randomUUID();
-            currentItem.superset_id = sharedId;
-            nextItem.superset_id = sharedId;
-        }
-        setItems(newItems);
-        markAsDirty();
-    };
-
-    // On passe l'info isFollower à la modale
-    const handleOpenModalForEdit = (item, isFollower = false) => { 
-        if (item.is_section_header) return; 
-        setItemToEdit(item); 
-        setIsEditingFollower(isFollower);
-        setIsCreatingForLibrary(false); 
-        setIsExerciseModalOpen(true); 
-    };
-
-    const handleLaunchCreatorFromLibrary = () => { setShowLibraryModal(false); setItemToEdit(null); setIsEditingFollower(false); setIsCreatingForLibrary(true); setIsExerciseModalOpen(true); };
-    const handleOpenSectionModal = () => { setIsSectionModalOpen(true); };
-    
-    const handleProgramChange = (e) => { 
-        setProgram({ ...program, [e.target.name]: e.target.value }); 
-        markAsDirty(); 
-    };
-
-    const handleConfirmAddSection = (sectionName) => { setItems([...items, { id: crypto.randomUUID(), name: sectionName, is_section_header: true }]); markAsDirty(); };
-    
-    const handleSaveItem = (itemData) => {
-        const existingIndex = items.findIndex(i => i.id === itemData.id);
-        if (existingIndex > -1) {
-            const updatedItems = [...items];
-            updatedItems[existingIndex] = { ...updatedItems[existingIndex], ...itemData }; 
-            setItems(updatedItems);
-            markAsDirty();
-        }
-    };
-
-    const handleSaveNewTemplateAndAdd = async (exerciseData) => {
-        const { data: { user } } = await supabase.auth.getUser();
-        const { data: existing } = await supabase.from('exercises').select('id').eq('coach_id', user.id).eq('is_template', true).ilike('name', exerciseData.name.trim()).maybeSingle();
-        if (existing) { addToast('error', `L'exercice existe déjà.`); return; }
-
-        const { id, ...dataWithoutId } = exerciseData; 
-        const rawData = { ...dataWithoutId, coach_id: user.id, is_template: true, program_id: null };
-        const dataToSave = sanitizeData(rawData);
-        const { data: newTemplate, error } = await supabase.from('exercises').insert(dataToSave).select().single();
-        if (error) { addToast('error', error.message); return; }
-        addToast('success', `Exercice ajouté.`);
-        setItems(currentItems => [...currentItems, { ...newTemplate, id: crypto.randomUUID(), is_template: false }]);
-        markAsDirty();
-    };
-    
-    const handleAddExerciseFromPanel = (exercise) => { setItems([...items, { ...exercise, id: crypto.randomUUID(), is_template: false, superset_id: null }]); markAsDirty(); };
-    const handleAddExercisesFromLibrary = (exercisesToAdd) => {
-        const newItems = exercisesToAdd.map(t => ({ ...t, id: crypto.randomUUID(), is_template: false, superset_id: null }));
-        setItems([...items, ...newItems]);
-        markAsDirty();
-    };
-    const handleDeleteItem = () => { setItems(items.filter(i => i.id !== itemToDelete.id)); setItemToDelete(null); markAsDirty(); };
-    
-    const sensors = useSensors(useSensor(PointerSensor), useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 }, }));
-    const handleDragEnd = (event) => {
-        const { active, over } = event;
-        if (active.id !== over.id) {
-            setItems((currentItems) => {
-                const oldIndex = currentItems.findIndex(item => item.id === active.id);
-                const newIndex = currentItems.findIndex(item => item.id === over.id);
-                return arrayMove(currentItems, oldIndex, newIndex);
-            });
-            markAsDirty();
-        }
-    };
-
-    const handleSaveProgram = async () => {
-        setIsSaving(true);
-        if (!program.name.trim()) { addToast('error', "Nom requis."); setIsSaving(false); return; }
-        try {
-            const { data: { user } } = await supabase.auth.getUser();
-            let savedProgram = program;
-            
-            const programDataToSave = {
-                name: program.name,
-                environment: program.environment,
-            };
-
-            if (isNewProgram) {
-                const { data, error } = await supabase.from('programs').insert({ ...programDataToSave, coach_id: user.id }).select().single();
-                if (error) throw error; savedProgram = data;
+    /* ─── Visual Groups ─── */
+    const visualGroups = useMemo(() => {
+        const groups = [];
+        let currentGroup = null;
+        items.forEach((item, index) => {
+            if (item.is_section_header) {
+                currentGroup = null;
+                groups.push({ type: 'section', items: [{ item, index }] });
+                return;
+            }
+            if (item.superset_id) {
+                if (currentGroup && currentGroup.supersetId === item.superset_id) {
+                    currentGroup.items.push({ item, index });
+                } else {
+                    currentGroup = { type: 'group', supersetId: item.superset_id, items: [{ item, index }] };
+                    groups.push(currentGroup);
+                }
             } else {
-                const { data, error } = await supabase.from('programs').update(programDataToSave).eq('id', programId).select().single();
-                if (error) throw error; savedProgram = data;
+                currentGroup = null;
+                groups.push({ type: 'solo', items: [{ item, index }] });
             }
-            await supabase.from('exercises').delete().eq('program_id', savedProgram.id);
-            if (items.length > 0) {
-                const itemsToInsert = items.map((item, index) => {
-                    const rawItem = {
-                        program_id: savedProgram.id, order: index, name: item.name, is_section_header: item.is_section_header || false,
-                        type: item.type, body_part: item.body_part, sets: item.sets, reps: item.reps, charge: item.charge,
-                        duration_minutes: item.duration_minutes, intensity: item.intensity, comment: item.comment,
-                        rest_time: item.rest_time, photo_url: item.photo_url, coach_id: user.id, is_template: false,
-                        superset_id: item.superset_id
-                    };
-                    return sanitizeData(rawItem);
-                });
-                const { error: itemsError } = await supabase.from('exercises').insert(itemsToInsert);
-                if (itemsError) throw itemsError;
-            }
-            addToast('success', `Programme sauvegardé.`);
-            if (onDirtyChange) onDirtyChange(false); onBack(true);
-        } catch (error) { addToast('error', error.message); } finally { setIsSaving(false); }
+        });
+        return groups;
+    }, [items]);
+
+    const handleOpenModalForEdit = (item, isFollower = false) => {
+        if (item.is_section_header) return;
+        setItemToEdit(item);
+        setIsEditingFollower(isFollower);
+        setIsCreatingForLibrary(false);
+        setIsExerciseModalOpen(true);
     };
-    
-    const handleDeleteProgram = async () => {
-        if (isNewProgram) return; setIsSaving(true);
-        try {
-            await supabase.from('client_programs').delete().eq('program_id', programId);
-            await supabase.from('exercises').delete().eq('program_id', programId);
-            await supabase.from('programs').delete().eq('id', programId);
-            addToast('success', `Supprimé.`); onBack(true); 
-        } catch (error) { addToast('error', error.message); setIsSaving(false); }
+
+    const handleLaunchCreatorFromLibrary = () => {
+        setShowLibraryModal(false); setItemToEdit(null); setIsEditingFollower(false);
+        setIsCreatingForLibrary(true); setIsExerciseModalOpen(true);
     };
-    
+
+    const confirmDeleteItem = () => { handleDeleteItem(itemToDelete.id); setItemToDelete(null); };
+
+    const onSaveProgram = async () => {
+        const success = await handleSaveProgram();
+        if (success) onBack(true);
+    };
+
+    const onDeleteProgram = async () => {
+        const success = await handleDeleteProgram();
+        if (success) onBack(true);
+    };
+
+    const sensors = useSensors(
+        useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+        useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } })
+    );
+
     if (loading) return <div className="screen"><p className="loading-text">Chargement...</p></div>;
 
     return (
         <>
-            <div className={`program-editor-layout ${isDesktop ? 'desktop' : 'mobile'}`}>
-                <div className="editor-main-panel">
-                    <div className="screen">
-                        <a href="#" className="back-link" onClick={() => onBack()}>← Retour</a>
-                        <div className="program-form-group">
-                            <h2>{isNewProgram ? "Nouveau" : "Modifier"} Programme</h2>
-                            <input name="name" value={program.name} onChange={handleProgramChange} placeholder="Nom du programme" style={{ marginBottom: '12px' }} />
-                            <div style={{ display: 'flex', gap: '12px' }}>
-                                <div style={{ flex: 1 }}>
-                                    <label style={{fontSize: '12px', fontWeight: 600, color: 'var(--text-light)'}}>Lieu / Matériel</label>
-                                    <select name="environment" value={program.environment} onChange={handleProgramChange} style={{ marginTop: '4px' }}>
+            <DndContext sensors={sensors} collisionDetection={customCollision}
+                onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={handleDragCancel}>
+                <div className={`program-editor-layout ${isDesktop ? 'desktop' : 'mobile'}`}>
+                    <div className="editor-main-panel">
+                        <div className="screen pe-screen">
+                            {/* ─── Top bar ─── */}
+                            <div className="pe-topbar">
+                                <div className="pe-topbar-left">
+                                    <a href="#" className="pe-back-link" onClick={(e) => { e.preventDefault(); onBack(); }}>← {isNewProgram ? 'Créer un programme' : 'Modifier le programme'}</a>
+                                    {!isNewProgram && <span className="pe-editing-label">Modification de {program.name}</span>}
+                                </div>
+                                <div className="pe-topbar-right">
+                                    <button className="pe-btn-cancel" onClick={() => onBack()}>Annuler</button>
+                                    <button className="pe-btn-save" onClick={onSaveProgram} disabled={isSaving}>
+                                        {isSaving ? '...' : (isNewProgram ? 'Enregistrer le programme' : 'Sauvegarder')}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* ─── Form section ─── */}
+                            <div className="pe-form-grid">
+                                <div className="pe-form-field">
+                                    <label>Nom du programme</label>
+                                    <input name="name" value={program.name} onChange={handleProgramChange} placeholder="ex. Hypertrophie 12 semaines" />
+                                </div>
+                                <div className="pe-form-field">
+                                    <label>Lieu / Environnement</label>
+                                    <select name="environment" value={program.environment} onChange={handleProgramChange}>
                                         <option value="Salle">🏋️‍♂️ Salle de sport</option>
                                         <option value="Domicile">🏠 Domicile</option>
                                     </select>
                                 </div>
                             </div>
-                        </div>
-                        <div className="page-header" style={{ marginTop: '20px', marginBottom: '16px' }}><h3>Contenu de la séance</h3></div>
-                        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-                            <SortableContext items={items} strategy={verticalListSortingStrategy}>
-                                <div className="exercise-list editor">
-                                    {items.map((item, index) => (
-                                        <SortableItem 
-                                            key={item.id} item={item} index={index} items={items}
-                                            onEdit={handleOpenModalForEdit} onDelete={setItemToDelete} onToggleLink={handleToggleLink}
-                                        />
-                                    ))}
-                                </div>
-                            </SortableContext>
-                        </DndContext>
-                        {items.length === 0 && <div className="empty-state"><p>Ajoutez des exercices.</p></div>}
-                        <div className="button-group" style={{ marginTop: '24px' }}>
-                            <div className="form-row">
-                                <button className="secondary" onClick={handleOpenSectionModal}>+ Section</button>
-                                <button className="secondary" onClick={() => setShowLibraryModal(true)}>+ Exercice</button>
+
+                            {/* ─── Exercises section ─── */}
+                            <div className="pe-exercises-section">
+                                <SortableContext items={items} strategy={verticalListSortingStrategy}>
+                                    <DroppableExerciseList>
+                                        {visualGroups.map((group, gIdx) => {
+
+                                            /* ── Section Header ── */
+                                            if (group.type === 'section') {
+                                                return <SortableSectionHeader key={group.items[0].item.id} item={group.items[0].item} onDelete={setItemToDelete} />;
+                                            }
+
+                                            /* ── Group Card (Superset / Circuit) ── */
+                                            if (group.type === 'group') {
+                                                const firstItem = group.items[0].item;
+                                                const count = group.items.length;
+                                                const executionMode = firstItem.execution_mode || 'Classique';
+                                                const isCircuit = useCircuitLayout(executionMode, count);
+                                                const label = getGroupLabel(count, executionMode);
+                                                const isEMOMVariant = ['EMOM', 'E2MOM', 'E3MOM', 'E4MOM', 'E5MOM'].includes(executionMode);
+                                                const emomMinutes = parseInt(executionMode.replace('EMOM', '').replace('E', '')) || 1;
+
+                                                return (
+                                                    <div key={group.supersetId} className="pe-group-wrapper">
+                                                        <DroppableGroupZone supersetId={group.supersetId}>
+                                                        <div className={`pe-group-card ${isCircuit ? 'circuit' : 'superset'}`}>
+                                                            {/* Group Header */}
+                                                            <div className="pe-group-header">
+                                                                <div className="pe-group-header-left">
+                                                                    <span className="pe-group-icon">{isCircuit ? <CircuitIcon /> : <SupersetIcon />}</span>
+                                                                    <span className="pe-group-label">{label}</span>
+                                                                </div>
+                                                                <div className="pe-group-header-right" onPointerDown={(e) => e.stopPropagation()}>
+                                                                    <div className="pe-mode-field">
+                                                                        <span className="pe-mode-label">MODE</span>
+                                                                        <select value={executionMode}
+                                                                            onChange={(e) => handleChangeExecutionMode(group.supersetId, e.target.value)}>
+                                                                            {EXECUTION_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                                                                        </select>
+                                                                    </div>
+                                                                    {executionMode === 'TABATA' && (
+                                                                        <>
+                                                                            <div className="pe-mode-param-field">
+                                                                                <span className="pe-mode-param-label">EFFORT (SEC)</span>
+                                                                                <input type="number" value={firstItem.tabata_work || ''}
+                                                                                    onChange={(e) => handleUpdateItemField(firstItem.id, 'tabata_work', e.target.value)} placeholder="20" />
+                                                                            </div>
+                                                                            <div className="pe-mode-param-field">
+                                                                                <span className="pe-mode-param-label">RÉCUP (SEC)</span>
+                                                                                <input type="number" value={firstItem.tabata_rest || ''}
+                                                                                    onChange={(e) => handleUpdateItemField(firstItem.id, 'tabata_rest', e.target.value)} placeholder="10" />
+                                                                            </div>
+                                                                        </>
+                                                                    )}
+                                                                    {executionMode === 'AMRAP' && (
+                                                                        <div className="pe-mode-param-field">
+                                                                            <span className="pe-mode-param-label">TEMPS (MIN)</span>
+                                                                            <input type="number" value={firstItem.amrap_duration || ''}
+                                                                                onChange={(e) => handleUpdateItemField(firstItem.id, 'amrap_duration', e.target.value)} placeholder="12" />
+                                                                        </div>
+                                                                    )}
+                                                                    {isEMOMVariant && (
+                                                                        <span className="pe-emom-info">⏱️ / {emomMinutes} min</span>
+                                                                    )}
+                                                                    <button className="pe-ungroup-btn" onClick={() => handleUngroupItem(group.supersetId)} title="Dissocier">✕</button>
+                                                                </div>
+                                                            </div>
+
+                                                            {/* Group Body */}
+                                                            <div className={`pe-group-body ${isCircuit ? 'circuit-grid' : 'superset-list'}`}>
+                                                                {group.items.map(({ item }, i) =>
+                                                                    isCircuit ? (
+                                                                        <SortableCircuitExercise key={item.id} item={item} circuitNumber={i + 1}
+                                                                            onEdit={handleOpenModalForEdit} onDelete={setItemToDelete} />
+                                                                    ) : (
+                                                                        <SortableSupersetExercise key={item.id} item={item}
+                                                                            onEdit={handleOpenModalForEdit} onDelete={setItemToDelete}
+                                                                            onUpdateItemField={handleUpdateItemField} />
+                                                                    )
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                        </DroppableGroupZone>
+                                                    </div>
+                                                );
+                                            }
+
+                                            /* ── Solo Exercise ── */
+                                            const { item } = group.items[0];
+                                            return (
+                                                <div key={item.id} className="pe-solo-wrapper">
+                                                    <DroppableSoloZone itemId={item.id}>
+                                                        <SortableSoloExercise item={item}
+                                                            onEdit={handleOpenModalForEdit} onDelete={setItemToDelete}
+                                                            onUpdateItemField={handleUpdateItemField} />
+                                                    </DroppableSoloZone>
+                                                </div>
+                                            );
+                                        })}
+                                    </DroppableExerciseList>
+                                </SortableContext>
+
+                                {items.length === 0 && (
+                                    <div className="pe-empty-state">
+                                        <p>Glissez des exercices depuis la bibliothèque ou utilisez le bouton ci-dessous.</p>
+                                    </div>
+                                )}
                             </div>
-                            <button onClick={handleSaveProgram} disabled={isSaving}>{isSaving ? '...' : 'Sauvegarder'}</button>
-                            {!isNewProgram && <button className="danger" onClick={() => setShowDeleteConfirm(true)}>Supprimer</button>}
+
+                            {/* Add exercise dashed button */}
+                            <button className="pe-add-exercise-dashed" onClick={() => setShowLibraryModal(true)}>
+                                <PlusCircleIcon />
+                                Ajouter un exercice ou un bloc
+                            </button>
+
+                            {/* Pro Tip banner */}
+                            {!isNewProgram && (
+                                <div className="pe-pro-tip">
+                                    <div className="pe-pro-tip-icon">ℹ️</div>
+                                    <div>
+                                        <strong>Astuce Pro</strong>
+                                        <p>La sauvegarde mettra immédiatement à jour le programme pour tous les clients assignés.</p>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Delete button */}
+                            {!isNewProgram && (
+                                <div style={{ marginTop: '24px' }}>
+                                    <button className="pe-btn-delete" onClick={() => setShowDeleteConfirm(true)}>Supprimer ce programme</button>
+                                </div>
+                            )}
                         </div>
                     </div>
+
+                    {isDesktop && <LibraryPanel onAddExercise={handleAddExerciseFromPanel} />}
                 </div>
-                {isDesktop && <LibraryPanel onAddExercise={handleAddExerciseFromPanel} />}
-            </div>
-            
+
+                <DragOverlay dropAnimation={null}>
+                    {activeDragData ? (
+                        <div className="drag-overlay-card">
+                            {activeDragData.type === 'separator' && <><span style={{ fontSize: '18px' }}>📌</span> {activeDragData.name}</>}
+                            {activeDragData.type === 'exercise' && <><span style={{ fontSize: '18px' }}>{getEmojiForType(activeDragData.exercise?.type)}</span> {activeDragData.exercise?.name}</>}
+                        </div>
+                    ) : null}
+                </DragOverlay>
+            </DndContext>
+
             {isExerciseModalOpen && (
-                <ExerciseEditorModal 
-                    exercise={itemToEdit} 
-                    // On passe la prop pour cacher les séries si c'est un suiveur
-                    hideSets={isEditingFollower}
-                    onClose={() => setIsExerciseModalOpen(false)} 
-                    onSave={isCreatingForLibrary ? handleSaveNewTemplateAndAdd : handleSaveItem} 
-                />
+                <ExerciseEditorModal exercise={itemToEdit} hideSets={isEditingFollower}
+                    programName={program.name}
+                    onClose={() => setIsExerciseModalOpen(false)}
+                    onSave={isCreatingForLibrary ? handleSaveNewTemplateAndAdd : handleSaveItem} />
             )}
-            {isSectionModalOpen && <AddSectionModal onClose={() => setIsSectionModalOpen(false)} onConfirm={handleConfirmAddSection} />}
             {showLibraryModal && <AddFromLibraryModal onClose={() => setShowLibraryModal(false)} onAddExercises={handleAddExercisesFromLibrary} onLaunchCreator={handleLaunchCreatorFromLibrary} />}
-            {itemToDelete && <ConfirmModal title="Supprimer" message={`Supprimer "${itemToDelete.name}" ?`} onConfirm={handleDeleteItem} onCancel={() => setItemToDelete(null)} />}
-            {showDeleteConfirm && <ConfirmModal title="Supprimer" message="Irréversible." onConfirm={handleDeleteProgram} onCancel={() => setShowDeleteConfirm(false)} confirmText="Oui" />}
+            {itemToDelete && <ConfirmModal title="Supprimer" message={`Supprimer "${itemToDelete.name}" ?`} onConfirm={confirmDeleteItem} onCancel={() => setItemToDelete(null)} />}
+            {showDeleteConfirm && <ConfirmModal title="Supprimer" message="Cette action est irréversible." onConfirm={onDeleteProgram} onCancel={() => setShowDeleteConfirm(false)} confirmText="Oui, supprimer" />}
         </>
     );
 };

@@ -5,6 +5,8 @@ import { useNotification } from '../contexts/NotificationContext';
 
 const AssignProgramModal = ({ client, programs, assignedProgramIds, onClose, onProgramAssigned }) => {
   const [selectedProgramId, setSelectedProgramId] = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
   const [loading, setLoading] = useState(false);
   const { addToast } = useNotification();
 
@@ -17,14 +19,23 @@ const AssignProgramModal = ({ client, programs, assignedProgramIds, onClose, onP
       addToast('error', 'Veuillez sélectionner un programme.');
       return;
     }
+    if (!startDate || !endDate) {
+      addToast('error', 'Veuillez définir les dates de début et de fin.');
+      return;
+    }
+    if (new Date(endDate) <= new Date(startDate)) {
+      addToast('error', 'La date de fin doit être postérieure à la date de début.');
+      return;
+    }
     setLoading(true);
     try {
       const { error } = await supabase.from('client_programs').insert({
         client_id: client.id,
         program_id: selectedProgramId,
+        start_date: startDate,
+        end_date: endDate,
       });
       if (error) {
-        // Gère le cas où le programme est déjà assigné (contrainte UNIQUE)
         if (error.code === '23505') {
             throw new Error("Ce programme est déjà assigné à ce client.");
         }
@@ -60,6 +71,16 @@ const AssignProgramModal = ({ client, programs, assignedProgramIds, onClose, onP
                   </option>
                 ))}
               </select>
+              <div className="assign-dates-row">
+                <div className="assign-date-field">
+                  <label>Date de début</label>
+                  <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} required />
+                </div>
+                <div className="assign-date-field">
+                  <label>Date de fin</label>
+                  <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} required />
+                </div>
+              </div>
               <button type="submit" disabled={loading}>{loading ? 'Assignation...' : 'Assigner le programme'}</button>
             </>
           ) : (

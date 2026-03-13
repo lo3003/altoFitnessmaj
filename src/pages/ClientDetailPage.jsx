@@ -1,7 +1,6 @@
 // src/pages/ClientDetailPage.jsx
-import React, { useState, useEffect, useCallback } from 'react';
-import { supabase } from '../services/supabaseClient';
-import { useNotification } from '../contexts/NotificationContext';
+import React, { useState } from 'react';
+import { useClientDetail } from '../hooks/useClientDetail';
 import ConfirmModal from '../components/ConfirmModal';
 import EditClientModal from '../components/EditClientModal';
 import AssignProgramModal from '../components/AssignProgramModal';
@@ -14,54 +13,22 @@ const EditIcon = () => (<svg width="16" height="16" viewBox="0 0 24 24" fill="no
 const TrashIcon = () => (<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>);
 
 const ClientDetailPage = ({ client, programs, onBack, onClientAction, onViewHistory, onOpenChat }) => {
-  const { addToast } = useNotification();
-  const [assignedPrograms, setAssignedPrograms] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const { assignedPrograms, loading, fetchAssignedPrograms, handleDeleteClient, handleUnassignProgram, handleCopyCode } = useClientDetail(client.id);
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [programToUnassign, setProgramToUnassign] = useState(null);
 
-  const fetchAssignedPrograms = useCallback(async () => {
-    setLoading(true);
-    const { data } = await supabase.from('client_programs').select(`programs (id, name)`).eq('client_id', client.id);
-    if (data) {
-        setAssignedPrograms(data.filter(item => item.programs).map(item => item.programs));
-    }
-    setLoading(false);
-  }, [client.id]);
-
-  useEffect(() => {
-    fetchAssignedPrograms();
-  }, [fetchAssignedPrograms]);
-
-  const handleDelete = async () => { 
-    try {
-        const { error } = await supabase.from('clients').delete().eq('id', client.id);
-        if (error) throw error;
-        addToast('success', `Client "${client.full_name}" supprimé.`);
-        onClientAction();
-    } catch (error) { addToast('error', "Erreur : " + error.message); }
+  const onConfirmDelete = async () => {
+    const success = await handleDeleteClient(client.full_name);
+    if (success) onClientAction();
   };
   
-  const handleUnassignProgram = async () => {
+  const onConfirmUnassign = async () => {
     if (!programToUnassign) return;
-    try {
-        const { error } = await supabase.from('client_programs').delete().match({ client_id: client.id, program_id: programToUnassign.id });
-        if (error) throw error;
-        addToast('success', `Le programme a été retiré.`);
-        setProgramToUnassign(null);
-        fetchAssignedPrograms();
-    } catch (error) {
-        addToast('error', error.message);
-        setProgramToUnassign(null);
-    }
-  };
-
-  const handleCopyCode = () => {
-    navigator.clipboard.writeText(client.client_code);
-    addToast('success', 'Code d\'accès copié !');
+    await handleUnassignProgram(programToUnassign.id);
+    setProgramToUnassign(null);
   };
 
   return (
@@ -73,7 +40,7 @@ const ClientDetailPage = ({ client, programs, onBack, onClientAction, onViewHist
           <div className="detail-layout-left">
             <div className="detail-card">
               <h2>{client.full_name}</h2>
-              <div className="client-code-wrapper" onClick={handleCopyCode} title="Copier le code">
+              <div className="client-code-wrapper" onClick={() => handleCopyCode(client.client_code)} title="Copier le code">
                 <span>Code d'accès : <strong>{client.client_code}</strong></span>
                 <CopyIcon />
               </div>
@@ -128,17 +95,47 @@ const ClientDetailPage = ({ client, programs, onBack, onClientAction, onViewHist
             {!loading && assignedPrograms.length === 0 && <div className="empty-state"><p>Aucun programme assigné.</p></div>}
             {!loading && assignedPrograms.length > 0 && (
               <div className="program-list">
-                {assignedPrograms.map(program => (
-                  <div key={program.id} className="program-card">
-                    <div className="program-info">
-                      <h3>{program.name}</h3>
-                      <p>Programme mixte</p>
+                {assignedPrograms.map(program => {
+                  const now = new Date();
+                  const end = program.end_date ? new Date(program.end_date) : null;
+                  const start = program.start_date ? new Date(program.start_date) : null;
+                  const isExpired = end && now > end;
+                  const isNotStarted = start && now < start;
+
+                  const formatDate = (d) => d ? new Date(d).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+
+                  // Progression: days elapsed / total days
+                  let progressPercent = 0;
+                  if (start && end) {
+                    const totalDays = Math.max(1, (end - start) / (1000 * 60 * 60 * 24));
+                    const elapsedDays = Math.max(0, (Math.min(now, end) - start) / (1000 * 60 * 60 * 24));
+                    progressPercent = Math.min(100, Math.round((elapsedDays / totalDays) * 100));
+                  }
+                  if (isExpired) progressPercent = 100;
+
+                  return (
+                    <div key={program.id} className={`program-card${isExpired ? ' expired' : ''}`}>
+                      <div className="program-info">
+                        <h3>{program.name}</h3>
+                        <div className="program-dates">
+                          <span>📅 {formatDate(program.start_date)} → {formatDate(program.end_date)}</span>
+                          {isExpired && <span className="program-status-badge expired">Terminé</span>}
+                          {isNotStarted && <span className="program-status-badge upcoming">À venir</span>}
+                          {!isExpired && !isNotStarted && start && <span className="program-status-badge active">En cours</span>}
+                        </div>
+                        <div className="program-progress">
+                          <div className="program-progress-bar">
+                            <div className="program-progress-fill" style={{ width: `${progressPercent}%` }} />
+                          </div>
+                          <span className="program-progress-text">{progressPercent}% • {program.sessions_done || 0} séance(s)</span>
+                        </div>
+                      </div>
+                      <button className="unassign-button" title="Retirer le programme" onClick={() => setProgramToUnassign(program)}>
+                        &times;
+                      </button>
                     </div>
-                    <button className="unassign-button" title="Retirer le programme" onClick={() => setProgramToUnassign(program)}>
-                      &times;
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -146,9 +143,9 @@ const ClientDetailPage = ({ client, programs, onBack, onClientAction, onViewHist
       </div>
       
       {showEditModal && <EditClientModal client={client} onClose={() => setShowEditModal(false)} onClientUpdated={(uc) => { onClientAction(uc); fetchAssignedPrograms(); }} />}
-      {showDeleteConfirm && <ConfirmModal title="Supprimer le client" message={`Êtes-vous sûr de vouloir supprimer ${client.full_name} ?`} onConfirm={handleDelete} onCancel={() => setShowDeleteConfirm(false)} />}
+      {showDeleteConfirm && <ConfirmModal title="Supprimer le client" message={`Êtes-vous sûr de vouloir supprimer ${client.full_name} ?`} onConfirm={onConfirmDelete} onCancel={() => setShowDeleteConfirm(false)} />}
       {showAssignModal && <AssignProgramModal client={client} programs={programs} assignedProgramIds={assignedPrograms.map(p => p.id)} onClose={() => setShowAssignModal(false)} onProgramAssigned={fetchAssignedPrograms} />}
-      {programToUnassign && <ConfirmModal title="Retirer le programme" message={`Retirer le programme "${programToUnassign.name}" de ce client ?`} onConfirm={handleUnassignProgram} onCancel={() => setProgramToUnassign(null)} confirmText="Oui, retirer" />}
+      {programToUnassign && <ConfirmModal title="Retirer le programme" message={`Retirer le programme "${programToUnassign.name}" de ce client ?`} onConfirm={onConfirmUnassign} onCancel={() => setProgramToUnassign(null)} confirmText="Oui, retirer" />}
     </>
   );
 };
